@@ -1,0 +1,524 @@
+
+/*
+  ================================================================
+  상태 머신(State Machine) 구조로 만든 00~99 업/다운 카운터
+  ================================================================
+  [이 프로그램이 하는 일 한 줄 요약]
+  평소엔 대기(빨강, 00 유지) 상태이다가, SW1을 클릭하면 0.5초마다
+  저절로 1씩 계속 증가(초록), SW2를 클릭하면 0.5초마다 저절로 1씩
+  계속 감소(파랑)합니다. 카운트 중 같은 버튼을 다시 클릭하면 멈추고
+  다시 대기 상태로 돌아갑니다.
+
+  [지난 버전과 무엇이 달라졌나?]
+  지난 번 코드는 direction(0, 1, -1)이라는 숫자 하나로 "지금 뭘 하고
+  있는지"를 표현했습니다. 이번 코드는 그 대신 "상태(State)"라는 개념을
+  도입해서, "지금 이 프로그램은 IDLE(대기)/COUNT_UP(증가)/COUNT_DOWN(감소)
+  세 가지 중 정확히 하나에 있다"라고 명확하게 이름을 붙였습니다.
+  이렇게 하면 상태가 늘어나도(나중에 5개, 10개가 되어도) 코드를 이해하기
+  훨씬 쉬워집니다. 이런 설계 방식을 "상태 머신(State Machine)"이라고 부릅니다.
+
+  아래 주석을 위에서부터 순서대로 읽으면서 하나씩 이해해보세요.
+*/
+// ================================================================
+// [1] 핀 번호에 이름 붙이기
+// ================================================================
+#define BCD_A 2   // 74LS47(디코더 IC)에 숫자를 이진수로 전달하는 4개 핀 중 1의 자리 비트
+#define BCD_B 3   // 2의 자리 비트
+#define BCD_C 4   // 4의 자리 비트
+#define BCD_D 5   // 8의 자리 비트
+
+#define FND_ONE 6 // 일의 자리 FND를 켜고 끄는 핀
+#define FND_TEN 7 // 십의 자리 FND를 켜고 끄는 핀
+
+#define LED_R 8   // RGB LED의 빨강
+#define LED_G 9   // RGB LED의 초록
+#define LED_B 10  // RGB LED의 파랑
+
+#define SW1 11    // 버튼1 (누르면 증가 시작/정지에 사용)
+#define SW2 12    // 버튼2 (누르면 감소 시작/정지에 사용)
+
+
+// FND 자리 선택 핀이 "켜짐"으로 인식되는 전압 레벨.
+// 이 값은 실제 회로(트랜지스터가 HIGH에서 켜지는지, LOW에서 켜지는지)에
+// 따라 달라지므로, FND가 반대로 동작하면 아래 두 줄을 서로 바꿔보세요.
+#define DIGIT_ON  LOW
+#define DIGIT_OFF HIGH
+
+
+// ================================================================
+// [2] 상태(State) 정의 - 이번 코드의 핵심 개념
+// ================================================================
+// enum(열거형)은 "이름이 있는 숫자들의 모음"을 만드는 문법입니다.
+// 아래처럼 쓰면 ST_IDLE=0, ST_COUNT_UP=1, ST_COUNT_DOWN=2 라는 정수값이
+// 자동으로 매겨지지만, 우리는 굳이 숫자를 몰라도 되고 그냥 이름(ST_IDLE 등)
+// 으로만 사용하면 됩니다. 코드가 훨씬 읽기 편해집니다.
+//
+// ---- 상태(State) 정의 ----
+// 이 예제에서는 State를 함수의 매개변수로 넘기지 않고 전역 변수로만 사용하기 때문에,
+// (최종 프로그램과 달리) 별도의 헤더 파일 분리 없이도 문제없이 컴파일됩니다.
+// (참고: Arduino는 함수들의 프로토타입을 자동으로 만들어주는데, 이때 State처럼
+//  직접 만든 자료형을 "함수의 매개변수"로 사용하면 가끔 순서 문제로 컴파일
+//  오류가 날 수 있습니다. 여기서는 State를 전역 변수로만 쓰기 때문에 안전합니다.)
+enum State {
+  ST_IDLE,       // 대기 상태 (빨강, "00" 유지)
+  ST_COUNT_UP,   // 0.5초마다 1씩 증가
+  ST_COUNT_DOWN  // 0.5초마다 1씩 감소
+};
+
+State state = ST_IDLE; // 프로그램은 항상 이 세 가지 중 하나의 상태에 있음
+// -> 이 변수 하나가 "지금 프로그램이 뭘 하고 있는지"를 완전히 결정합니다.
+//    loop()의 맨 아래를 보면, 이 state 값에 따라 서로 다른 함수가 호출됩니다.
+
+int currentValue = 0; // 지금 화면에 표시 중인 값 (0~99)
+unsigned long lastStep = 0; // 마지막으로 값이 바뀐 시각 (카운트용 타이머)
+// -> millis()가 돌려주는 "지금까지 지난 시간(ms)"과 비교하기 위해 저장해두는 변수.
+//    이 값을 이용해서 "0.5초가 지났는지"를 판단합니다. (아래 [7]에서 자세히 설명)
+
+
+// ================================================================
+// [3] BCD(이진수) 출력 함수
+// ================================================================
+// 74LS47 IC는 0~9 숫자를 4비트 이진수로 넣어주면 자동으로 7세그먼트
+// 패턴으로 바꿔서 FND에 보여줍니다. 그래서 우리는 이 4개 핀만 잘
+// 켜고 끄면 됩니다.
+void showBCD(int d) {
+  // "d & 0x01"은 d의 가장 오른쪽(마지막) 비트 하나만 꺼내는 것이고,
+  // "(d >> n) & 0x01"은 d를 오른쪽으로 n칸 민 다음 마지막 비트를 꺼내는 것입니다.
+  // 예) d = 6 이면 이진수로 0110 입니다.
+  //     d & 1        = 0110 & 1 = 0  -> BCD_A = 0
+  //     (d>>1) & 1   = 0011 & 1 = 1  -> BCD_B = 1
+  //     (d>>2) & 1   = 0001 & 1 = 1  -> BCD_C = 1
+  //     (d>>3) & 1   = 0000 & 1 = 0  -> BCD_D = 0
+  //     결과: D,C,B,A = 0,1,1,0 = 이진수 0110 = 십진수 6 (정확히 맞음!)
+  digitalWrite(BCD_A, (d >> 0) & 0x01);
+  digitalWrite(BCD_B, (d >> 1) & 0x01);
+  digitalWrite(BCD_C, (d >> 2) & 0x01);
+  digitalWrite(BCD_D, (d >> 3) & 0x01);
+}
+
+
+// ================================================================
+// [4] RGB LED 색상 지정 함수
+// ================================================================
+// 문자 하나('R', 'G', 'B')만 넘기면 그 색만 켜지고 나머지는 자동으로
+// 꺼지도록 만든 편의 함수입니다.
+void setColor(char c) {
+  // "c == 'R' ? HIGH : LOW" 는 "c가 'R'이면 HIGH, 아니면 LOW"라는 뜻의
+  // 삼항 연산자(if문을 한 줄로 줄인 것)입니다.
+  digitalWrite(LED_R, c == 'R' ? HIGH : LOW);
+  digitalWrite(LED_G, c == 'G' ? HIGH : LOW);
+  digitalWrite(LED_B, c == 'B' ? HIGH : LOW);
+}
+
+
+// ================================================================
+// [5] 버튼이 눌렸는지 확인하는 함수
+// ================================================================
+// 이 회로는 외부 풀업저항 방식이라, 평소엔 핀이 HIGH이고 버튼을 누르면
+// GND로 연결되어 LOW가 됩니다. 그래서 "LOW다 = 눌린 상태다"로 판단합니다.
+bool isPressed(int pin) {
+  return digitalRead(pin) == LOW;
+}
+
+
+// ================================================================
+// [6] 버튼 "클릭(눌렀다 뗀 순간)"을 감지하는 함수
+// ================================================================
+// "지금 눌려있다"만으로는 클릭을 판단할 수 없습니다. 버튼을 누르고 있는
+// 동안 loop()가 수백 번 반복되면서 계속 "눌려있음"이 나오기 때문입니다.
+// 그래서 "클릭 = 직전엔 눌려있었는데 지금은 안 눌려있다(막 뗀 순간)"로
+// 정의해서, 버튼 하나를 눌렀다 뗄 때 딱 한 번만 true가 나오게 만듭니다.
+bool detectClick(int pin, bool &prevPressed) {
+  // 매개변수 앞의 &는 "참조 전달"입니다. 이 함수 안에서 prevPressed 값을
+  // 바꾸면, 함수를 호출한 바깥쪽 변수(sw1Prev, sw2Prev)도 실제로 바뀝니다.
+  // (참조가 없으면 값만 복사되어서 바깥 변수는 전혀 바뀌지 않습니다)
+  bool nowPressed = isPressed(pin);            // 지금 이 순간 눌려있는지 확인
+  bool clicked = (prevPressed && !nowPressed); // 직전엔 눌림 && 지금은 안눌림 -> 클릭!
+  prevPressed = nowPressed; // 다음 호출을 위해 "직전 상태"를 지금 상태로 갱신
+  return clicked;
+}
+
+bool sw1Prev = false; // SW1의 "직전 프레임 눌림 상태"를 기억
+bool sw2Prev = false; // SW2도 마찬가지
+
+
+// ================================================================
+// [7] 화면 멀티플렉싱 (millis() 기반 논블로킹 방식)
+// ================================================================
+// FND가 2개인데 74LS47(세그먼트 출력)은 1개뿐이라서, 두 FND의 세그먼트
+// 배선을 하나로 공유하고, "지금 이 순간엔 어느 자리만 실제로 켜져 있을지"를
+// FND_TEN / FND_ONE 두 핀으로 아주 빠르게 번갈아가며 바꿔줍니다.
+// 이렇게 4ms(MUX_INTERVAL)마다 자리를 바꾸면, 사람 눈에는 두 자리가
+// "동시에" 켜져 있는 것처럼 보입니다. (이걸 잔상 효과, POV라고 부릅니다)
+//
+// delay()를 쓰지 않고 millis()로 시간을 확인하는 이유는, delay()를 쓰면
+// 그 시간 동안 다른 어떤 코드도 실행되지 않아서 버튼 반응이나 화면
+// 갱신이 전부 멈춰버리기 때문입니다. 아래처럼
+//     if (지금시각 - 마지막처리시각 >= 원하는간격) { ...; 마지막처리시각 = 지금시각; }
+// 패턴을 쓰면, loop()가 계속 빠르게 돌면서도 "간격이 지났을 때만"
+// 원하는 동작을 하게 만들 수 있습니다. 이것을 "논블로킹 타이머"라고 합니다.
+const unsigned long MUX_INTERVAL = 4;
+
+void updateMultiplex(unsigned long now) {
+  // static 변수는 함수가 여러 번 호출되어도 값이 계속 유지됩니다.
+  // (일반 지역 변수는 함수가 끝나면 사라지지만, static은 사라지지 않습니다)
+  static unsigned long lastMux = 0; // 마지막으로 자리를 바꾼 시각
+  static bool showOnes = false;     // 지금 일의 자리 차례인지 십의 자리 차례인지
+
+  if (now - lastMux < MUX_INTERVAL) return; // 아직 4ms 안 지났으면 아무것도 안 함
+  lastMux = now;
+  showOnes = !showOnes; // 자리를 반대로 뒤집기(교대)
+
+  // 자리를 바꾸기 전에 두 자리를 모두 꺼서, 숫자가 바뀌는 순간
+  // 두 자리에 엉뚱한 패턴이 겹쳐 보이는 현상(고스트)을 방지합니다.
+  digitalWrite(FND_TEN, DIGIT_OFF);
+  digitalWrite(FND_ONE, DIGIT_OFF);
+
+  int tens = currentValue / 10; // 정수 나눗셈(소수점 버림) -> 십의 자리 숫자
+  int ones = currentValue % 10; // 나머지 연산 -> 일의 자리 숫자
+  // 예) currentValue = 47 이면 tens = 47/10 = 4, ones = 47%10 = 7
+
+  if (showOnes) {
+    showBCD(ones);
+    digitalWrite(FND_ONE, DIGIT_ON); // 일의 자리만 실제로 켜기
+  } else {
+    showBCD(tens);
+    digitalWrite(FND_TEN, DIGIT_ON); // 십의 자리만 실제로 켜기
+  }
+}
+
+
+// ================================================================
+// [8] 상태별 처리 함수 - 상태 머신의 핵심
+// ================================================================
+// "지금 이 상태일 때 버튼을 클릭하면 무슨 일이 일어나야 하는지"를
+// 각 함수가 하나씩 책임집니다. loop()는 지금 state가 무엇인지 보고
+// 이 세 함수 중 딱 하나만 호출합니다. (switch-case로 구현, [10] 참고)
+
+// ---- 상태별 처리 함수 ----
+// "지금 이 상태일 때 버튼을 클릭하면 무슨 일이 일어나야 하는지"를 각 함수가 책임집니다.
+
+// [IDLE 상태] 대기 중일 때 처리
+void handleIdle(bool sw1Click, bool sw2Click) {
+  if (sw1Click) {
+    state = ST_COUNT_UP;   // 상태를 "증가"로 전환
+    setColor('G');         // LED를 초록으로
+  } else if (sw2Click) {
+    state = ST_COUNT_DOWN; // 상태를 "감소"로 전환
+    setColor('B');         // LED를 파랑으로
+  }
+  // -> 이 상태에서는 아직 값이 자동으로 바뀌지 않습니다. 그냥 버튼 클릭을
+  //    기다렸다가 상태만 바꿔주는 역할을 합니다.
+}
+
+// [COUNT_UP 상태] 0.5초마다 값을 1씩 증가시키는 중일 때 처리
+void handleCountUp(unsigned long now, bool sw1Click, bool sw2Click) {
+  if (sw1Click) { // 자기 자신을 다시 클릭 -> 정지하고 대기 상태로
+    state = ST_IDLE;
+    setColor('R');
+    return; // 여기서 함수를 끝내버리므로, 아래의 증가 로직은 실행되지 않음
+  }
+  if (sw2Click) { // 반대 스위치 클릭 -> 감소 상태로 전환
+    state = ST_COUNT_DOWN;
+    setColor('B');
+    return;
+  }
+
+  // 위 두 조건에 해당하지 않으면(아무 버튼도 새로 클릭하지 않았으면),
+  // 0.5초(500ms)가 지났는지 확인해서 지났으면 값을 1 증가시킵니다.
+  // 이것도 [7]에서 배운 논블로킹 타이머 패턴입니다.
+  if (now - lastStep >= 500) {
+    lastStep = now; // "마지막으로 값 바꾼 시각"을 지금으로 갱신
+    currentValue++;
+    if (currentValue > 99) currentValue = 0; // 99 다음엔 다시 00으로(순환)
+  }
+}
+
+// [COUNT_DOWN 상태] 0.5초마다 값을 1씩 감소시키는 중일 때 처리
+// (handleCountUp과 완전히 대칭되는 구조입니다. 비교해서 읽어보세요)
+void handleCountDown(unsigned long now, bool sw1Click, bool sw2Click) {
+  if (sw2Click) { // 자기 자신을 다시 클릭 -> 정지
+    state = ST_IDLE;
+    setColor('R');
+    return;
+  }
+  if (sw1Click) { // 반대 스위치 클릭 -> 증가 상태로 전환
+    state = ST_COUNT_UP;
+    setColor('G');
+    return;
+  }
+
+  if (now - lastStep >= 500) {
+    lastStep = now;
+    currentValue--;
+    if (currentValue < 0) currentValue = 99; // 00 다음엔 다시 99로(순환)
+  }
+}
+
+
+// ================================================================
+// [9] setup() : 전원을 켰을 때 딱 한 번만 실행
+// ================================================================
+void setup() {
+  // pinMode(핀, OUTPUT/INPUT): 이 핀을 출력용(전압을 내보냄)으로 쓸지,
+  // 입력용(외부 신호를 받아들임)으로 쓸지 정하는 것입니다.
+  pinMode(BCD_A, OUTPUT);
+  pinMode(BCD_B, OUTPUT);
+  pinMode(BCD_C, OUTPUT);
+  pinMode(BCD_D, OUTPUT);
+
+  pinMode(FND_TEN, OUTPUT);
+  pinMode(FND_ONE, OUTPUT);
+  digitalWrite(FND_TEN, DIGIT_OFF); // 전원 켜지자마자 두 자리 모두 꺼진 채로 시작
+  digitalWrite(FND_ONE, DIGIT_OFF);
+
+  pinMode(SW1, INPUT); // 외부 풀업저항이 이미 있으므로 INPUT으로 설정
+  pinMode(SW2, INPUT);
+
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+  setColor('R'); // 시작은 대기 상태(빨강)
+}
+
+
+// ================================================================
+// [10] loop() : 전원이 켜져있는 동안 무한 반복 실행
+// ================================================================
+void loop() {
+  unsigned long now = millis(); // 지금까지 지난 시간(ms)을 한 번만 읽어서 재사용
+
+  updateMultiplex(now); // 상태와 무관하게 항상 화면 갱신
+  // -> 이 줄은 지금 state가 무엇이든 상관없이 매번 실행됩니다. 화면은
+  //    IDLE이든 COUNT_UP이든 항상 계속 켜져 있어야 하기 때문입니다.
+
+  bool sw1Click = detectClick(SW1, sw1Prev); // SW1이 방금 클릭됐는지 확인
+  bool sw2Click = detectClick(SW2, sw2Prev); // SW2가 방금 클릭됐는지 확인
+
+  // 핵심: 지금 상태(state)에 따라 딱 하나의 처리 함수만 호출됨
+  // switch-case문은 "state 값이 무엇이냐에 따라 서로 다른 코드 블록을
+  // 실행하라"는 뜻입니다. if-else를 여러 번 쓰는 것보다 상태가 많을 때
+  // 훨씬 읽기 편합니다. 각 case 끝의 break;는 "여기서 멈추고 switch문을
+  // 빠져나가라"는 뜻으로, 빼먹으면 아래 case까지 실수로 실행되어버립니다.
+  switch (state) {
+    case ST_IDLE:
+      handleIdle(sw1Click, sw2Click);
+      break;
+    case ST_COUNT_UP:
+      handleCountUp(now, sw1Click, sw2Click);
+      break;
+    case ST_COUNT_DOWN:
+      handleCountDown(now, sw1Click, sw2Click);
+      break;
+  }
+}
+
+
+
+/*
+상태 머신(State Machine) 구조 도입
+[학습 내용]
+ - "상태 머신"이 무엇인지: 프로그램이 항상 여러 "상태" 중 하나에 있고,
+  조건(스위치 입력 등)에 따라 다른 상태로 "전환"되는 설계 방식
+ - enum(열거형)으로 상태 이름을 만드는 방법
+ - switch-case로 "지금 상태에 맞는 처리 함수"만 실행하는 방법
+ - 각 상태별 진입/처리를 함수를 나눠서 코드를 정리하는 방법
+
+ [앞 단계와 달라진 점]
+ 앞에서는 direction(0/1/-1) 이라는 변수 하나로 "지금 뭘 하고 있는지"를 표현함.
+ 이 방식은 상태가 2~3개일 때는 괜찮지만, 우리 최종 프로그램처럼 상태가 5개
+ (초기화/대기/동작1/동작2/동작3)이고 상태마다 해야 할 일이 많아지면 금방 복잡해짐.
+ 그래서 이번 단계에서는 "상태"를 명확한 이름(enum)으로 정의하고,
+ 상태별로 별도의 함수(handleIdle, handleCountUp, handleCountDown)를 만들어서
+ loop()에서는 "지금 상태에 맞는 함수만 호출"하도록 구조를 바꿈.
+
+ 이 구조가 익숙해지면, 최종 프로그램의 5가지 상태도 똑같은 원리로 이해할 수 있음. 
+
+ 이번 단계는 "눌렀던 스위치를 다시 누르면 멈추고 대기 상태로 돌아감"으로 단순화함.
+
+[이번 학습에서 해볼 내용]
+1. 대기 상태(빨강)에서 SW1을 클릭하면 초록 LED가 점등, 카운트 업 확인
+2. 카운트가 올라가는 중 SW1을 다시 클릭하면 멈추고 대기(빨강)로 돌아가는지 확인.
+3. SW1로 감소 카운트도 동일하게 확인
+4. SW3을 누르면 언제든지 즉시 값이 00으로 리셋되고 대기 상태별로 돌아가는 기능을 추가해보세요.
+*/
+
+/*
+#define BCD_A 2
+#define BCD_B 3
+#define BCD_C 4
+#define BCD_D 5
+
+#define FND_ONE 6
+#define FND_TEN 7
+
+#define LED_R 8
+#define LED_G 9
+#define LED_B 10
+
+#define SW1 11
+#define SW2 12
+
+
+#define DIGIT_ON  HIGH
+#define DIGIT_OFF LOW
+
+const unsigned long MUX_INTERVAL = 4;
+
+// ---- 상태(State) 정의 ----
+// 이 예제에서는 State를 함수의 매개변수로 넘기지 않고 전역 변수로만 사용하기 때문에,
+// (최종 프로그램과 달리) 별도의 헤더 파일 분리 없이도 문제없이 컴파일됩니다.
+enum State {
+  ST_IDLE,       // 대기 상태 (빨강, "00" 유지)
+  ST_COUNT_UP,   // 0.5초마다 1씩 증가
+  ST_COUNT_DOWN  // 0.5초마다 1씩 감소
+};
+
+State state = ST_IDLE; // 프로그램은 항상 이 세 가지 중 하나의 상태에 있음
+
+int currentValue = 0;
+unsigned long lastStep = 0; // 마지막으로 값이 바뀐 시각 (카운트용 타이머)
+
+void showBCD(int d) {
+  digitalWrite(BCD_A, d & 0x01);
+  digitalWrite(BCD_B, (d >> 1) & 0x01);
+  digitalWrite(BCD_C, (d >> 2) & 0x01);
+  digitalWrite(BCD_D, (d >> 3) & 0x01);
+}
+
+void setColor(char c) {
+  digitalWrite(LED_R, c == 'R' ? HIGH : LOW);
+  digitalWrite(LED_G, c == 'G' ? HIGH : LOW);
+  digitalWrite(LED_B, c == 'B' ? HIGH : LOW);
+}
+
+bool isPressed(int pin) {
+  return digitalRead(pin) == LOW;
+}
+
+bool detectClick(int pin, bool &prevPressed) {
+  bool nowPressed = isPressed(pin);
+  bool clicked = (prevPressed && !nowPressed);
+  prevPressed = nowPressed;
+  return clicked;
+}
+
+bool sw1Prev = false;
+bool sw2Prev = false;
+
+void updateMultiplex(unsigned long now) {
+  static unsigned long lastMux = 0;
+  static bool showOnes = false;
+
+  if (now - lastMux < MUX_INTERVAL) return;
+  lastMux = now;
+  showOnes = !showOnes;
+
+  digitalWrite(FND_TEN, DIGIT_OFF);
+  digitalWrite(FND_ONE, DIGIT_OFF);
+
+  int tens = currentValue / 10;
+  int ones = currentValue % 10;
+
+  if (showOnes) {
+    showBCD(ones);
+    digitalWrite(FND_ONE, DIGIT_ON);
+  } else {
+    showBCD(tens);
+    digitalWrite(FND_TEN, DIGIT_ON);
+  }
+}
+
+// ---- 상태별 처리 함수 ----
+// "지금 이 상태일 때 버튼을 클릭하면 무슨 일이 일어나야 하는지"를 각 함수가 책임집니다.
+
+void handleIdle(bool sw1Click, bool sw2Click) {
+  if (sw1Click) {
+    state = ST_COUNT_UP;
+    setColor('G');
+  } else if (sw2Click) {
+    state = ST_COUNT_DOWN;
+    setColor('B');
+  }
+}
+
+void handleCountUp(unsigned long now, bool sw1Click, bool sw2Click) {
+  if (sw1Click) { // 자기 자신을 다시 클릭 -> 정지하고 대기 상태로
+    state = ST_IDLE;
+    setColor('R');
+    return;
+  }
+  if (sw2Click) { // 반대 스위치 클릭 -> 감소 상태로 전환
+    state = ST_COUNT_DOWN;
+    setColor('B');
+    return;
+  }
+
+  if (now - lastStep >= 500) {
+    lastStep = now;
+    currentValue++;
+    if (currentValue > 99) currentValue = 0;
+  }
+}
+
+void handleCountDown(unsigned long now, bool sw1Click, bool sw2Click) {
+  if (sw2Click) {
+    state = ST_IDLE;
+    setColor('R');
+    return;
+  }
+  if (sw1Click) {
+    state = ST_COUNT_UP;
+    setColor('G');
+    return;
+  }
+
+  if (now - lastStep >= 500) {
+    lastStep = now;
+    currentValue--;
+    if (currentValue < 0) currentValue = 99;
+  }
+}
+
+void setup() {
+  pinMode(BCD_A, OUTPUT);
+  pinMode(BCD_B, OUTPUT);
+  pinMode(BCD_C, OUTPUT);
+  pinMode(BCD_D, OUTPUT);
+
+  pinMode(FND_TEN, OUTPUT);
+  pinMode(FND_ONE, OUTPUT);
+  digitalWrite(FND_TEN, DIGIT_OFF);
+  digitalWrite(FND_ONE, DIGIT_OFF);
+
+  pinMode(SW1, INPUT);
+  pinMode(SW2, INPUT);
+
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+  setColor('R');
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  updateMultiplex(now); // 상태와 무관하게 항상 화면 갱신
+
+  bool sw1Click = detectClick(SW1, sw1Prev);
+  bool sw2Click = detectClick(SW2, sw2Prev);
+
+  // 핵심: 지금 상태(state)에 따라 딱 하나의 처리 함수만 호출됨
+  switch (state) {
+    case ST_IDLE:
+      handleIdle(sw1Click, sw2Click);
+      break;
+    case ST_COUNT_UP:
+      handleCountUp(now, sw1Click, sw2Click);
+      break;
+    case ST_COUNT_DOWN:
+      handleCountDown(now, sw1Click, sw2Click);
+      break;
+  }
+}
+*/
