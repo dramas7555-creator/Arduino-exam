@@ -1,0 +1,101 @@
+/*
+  ================================================================
+  2단계: FND 2개 멀티플렉싱 (00~99 자동 카운트업)
+  ================================================================
+  [이번 단계에서 배우는 것]
+  - 왜 FND가 2개면 "멀티플렉싱(시분할 구동)"이 필요한지
+  - 잔상 효과(POV, Persistence Of Vision) 원리
+  - 두 자리 숫자를 십의 자리 / 일의 자리로 나누는 방법 (÷10, %10)
+
+  [왜 멀티플렉싱이 필요한가?]
+  74LS47은 1개뿐인데 FND는 2개를 써야 합니다. 그래서 두 FND의 세그먼트(a~g) 배선을
+  하나로 묶어서 74LS47 출력 하나를 공유합니다. 대신 각 FND의 공통애노드는
+  트랜지스터로 따로 켜고 끌 수 있게 분리해 둡니다.
+  이 상태에서 "십의 자리 트랜지스터 켜고 -> 짧게 대기 -> 끄고 -> 일의 자리 켜고 -> 짧게
+  대기 -> 끄고"를 아주 빠르게(예: 2ms 간격) 반복하면, 사람 눈에는 두 자리가
+  "동시에" 켜져 있는 것처럼 보입니다. 이걸 잔상 효과라고 합니다.
+
+  [회로 추가 사항 (1단계 대비)]
+  - FND 공통애노드를 이제 VCC에 직결하지 않고, 각 자리마다 트랜지스터를 거쳐서
+    독립적으로 켜고 끌 수 있게 배선합니다.
+  - 십의 자리 선택 트랜지스터 베이스 -> 아두이노 7번 핀
+  - 일의 자리 선택 트랜지스터 베이스 -> 아두이노 6번 핀
+  - (주의) 이 예제는 트랜지스터가 "HIGH일 때 켜짐"이라고 가정합니다.
+    실제 회로가 반대(LOW일 때 켜짐)라면 DIGIT_ON/DIGIT_OFF 값을 서로 바꾸세요.
+
+  [이 단계의 한계 (5단계에서 개선 예정)]
+  delay()를 사용한 "바쁜 대기(busy-wait)" 방식으로 멀티플렉싱을 흉내 냅니다.
+  즉, 한 자리를 켜놓고 delay(2)로 잠깐 기다리는 것을 여러 번 반복해서
+  "이 숫자를 약 0.5초간 보여준다"를 구현합니다. 이 방식은 이해하기는 쉽지만,
+  나중에 버튼 입력을 자연스럽게 받으려면 delay() 없이 만드는 방법(millis())이
+  필요합니다. 그 내용은 5단계에서 다룹니다.
+
+  [해볼 것]
+  1) FND에 00부터 99까지 자동으로 숫자가 올라가는지 확인하세요.
+  2) MUX_HOLD_MS 값을 줄이거나 늘려서 자릿수 전환 속도가 달라지는 걸 관찰해보세요.
+     너무 느리게(예: 20 이상) 하면 두 자리가 번갈아 깜빡이는 게 눈에 보이기 시작합니다.
+  3) DIGIT_HOLD_COUNT(한 숫자를 보여주는 시간)를 줄여서 카운트 속도를 빠르게 해보세요.
+*/
+
+#define BCD_A 2
+#define BCD_B 3
+#define BCD_C 4
+#define BCD_D 5
+
+#define DIG_TENS 7  // 십의 자리 선택 트랜지스터
+#define DIG_ONES 6  // 일의 자리 선택 트랜지스터
+
+#define DIGIT_ON  HIGH  // 실제 회로에 맞게 조정 (반대라면 LOW로 변경)
+#define DIGIT_OFF LOW
+
+const int MUX_HOLD_MS = 2;         // 한 자리를 켜놓고 대기하는 시간(ms). 잔상이 자연스럽게 보이도록 짧게.
+const int DIGIT_HOLD_COUNT = 125;  // 숫자 하나를 보여주기 위해 멀티플렉싱을 반복하는 횟수
+                                     // (2ms x 125회 x 2자리 = 대략 0.5초 동안 한 숫자를 표시)
+
+void showBCD(int d) {
+  digitalWrite(BCD_A, d & 0x01);
+  digitalWrite(BCD_B, (d >> 1) & 0x01);
+  digitalWrite(BCD_C, (d >> 2) & 0x01);
+  digitalWrite(BCD_D, (d >> 3) & 0x01);
+}
+
+// 두 자리 숫자(0~99)를 짧은 순간 동안 한 번 멀티플렉싱하는 함수.
+// 이 함수를 아주 여러 번 반복 호출하면 사람 눈에는 두 자리가 동시에 켜진 것처럼 보입니다.
+void multiplexOnce(int value) {
+  int tens = value / 10; // 십의 자리 숫자
+  int ones = value % 10; // 일의 자리 숫자
+
+  // 십의 자리 표시
+  digitalWrite(DIG_ONES, DIGIT_OFF); // 다른 자리는 꺼두고
+  showBCD(tens);
+  digitalWrite(DIG_TENS, DIGIT_ON);
+  delay(MUX_HOLD_MS);
+  digitalWrite(DIG_TENS, DIGIT_OFF);
+
+  // 일의 자리 표시
+  showBCD(ones);
+  digitalWrite(DIG_ONES, DIGIT_ON);
+  delay(MUX_HOLD_MS);
+  digitalWrite(DIG_ONES, DIGIT_OFF);
+}
+
+void setup() {
+  pinMode(BCD_A, OUTPUT);
+  pinMode(BCD_B, OUTPUT);
+  pinMode(BCD_C, OUTPUT);
+  pinMode(BCD_D, OUTPUT);
+
+  pinMode(DIG_TENS, OUTPUT);
+  pinMode(DIG_ONES, OUTPUT);
+  digitalWrite(DIG_TENS, DIGIT_OFF);
+  digitalWrite(DIG_ONES, DIGIT_OFF);
+}
+
+void loop() {
+  for (int value = 0; value <= 99; value++) {
+    // 이 숫자를 DIGIT_HOLD_COUNT번 멀티플렉싱 -> 약 0.5초 동안 안정적으로 표시됨
+    for (int i = 0; i < DIGIT_HOLD_COUNT; i++) {
+      multiplexOnce(value);
+    }
+  }
+}
