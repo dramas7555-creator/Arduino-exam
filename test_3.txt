@@ -1,0 +1,9 @@
+받은메세지 : ? Github 회원가입 (https://github.com/signup)
+받은메세지 : ? Github Desktop 설치 (https://desktop.github.com/download)
+받은메세지 : https://github.com/new
+받은메세지 : https://github.com/gvanrossum/cpython
+받은메세지 : https://github.com/apache/zeppelin/pull/5467
+받은메세지 : git revert
+받은메세지 : git reset
+받은메세지 : https://github.com/seung-00/my-repository/pull/2
+받은메세지 : https://github.com/seung-00/my-repository/blob/main/%EC%84%B8%EB%AA%85%EA%B3%A02.pdf
